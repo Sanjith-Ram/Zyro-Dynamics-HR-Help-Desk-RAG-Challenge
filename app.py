@@ -97,8 +97,27 @@ REFUSAL_MESSAGE = (
 
 @st.cache_resource(show_spinner="Building RAG pipeline…")
 def build_pipeline():
-    loader = PyPDFDirectoryLoader(CORPUS_PATH)
-    documents = loader.load()
+    import glob
+    from langchain_community.document_loaders import PyPDFLoader
+
+    # Load each PDF individually, skipping corrupted ones
+    documents = []
+    pdf_files = glob.glob(os.path.join(CORPUS_PATH, "**/*.pdf"), recursive=True) + \
+                glob.glob(os.path.join(CORPUS_PATH, "*.pdf"))
+
+    for pdf_path in pdf_files:
+        try:
+            loader = PyPDFLoader(pdf_path)
+            docs = loader.load()
+            documents.extend(docs)
+            print(f"✅ Loaded: {os.path.basename(pdf_path)} ({len(docs)} pages)")
+        except Exception as e:
+            st.warning(f"⚠️ Skipped corrupted file: {os.path.basename(pdf_path)}")
+            print(f"❌ Skipped {pdf_path}: {e}")
+
+    if not documents:
+        st.error("No valid HR documents found. Please check your CORPUS_PATH.")
+        st.stop()
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_documents(documents)
@@ -109,8 +128,6 @@ def build_pipeline():
 
     llm = ChatGroq(model="llama3-8b-8192", temperature=0.1, max_tokens=512, api_key=GROQ_API_KEY)
     return retriever, llm
-
-retriever, llm = build_pipeline()
 
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
