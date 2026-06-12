@@ -132,7 +132,7 @@ def build_pipeline():
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
-def ask_bot(question: str):
+def ask_bot(question: str, retriever, llm):
     oos_check = StrOutputParser().invoke(
         llm.invoke(OOS_PROMPT.invoke({"question": question}))
     ).strip().upper()
