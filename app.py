@@ -111,7 +111,7 @@ def build_pipeline():
     retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 4})
 
     llm = ChatGroq(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         temperature=0.1,
         max_tokens=1024,
         groq_api_key=GROQ_API_KEY
