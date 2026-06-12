@@ -173,7 +173,7 @@ if question := st.chat_input("Ask an HR question…"):
 
     with st.chat_message("assistant"):
         with st.spinner("Looking up HR policies…"):
-            result = ask_bot(question)
+            result = ask_bot(question, retriever, llm)
 
         if not result["in_scope"]:
             st.markdown(f'<div class="oos-msg">⚠️ {result["answer"]}</div>', unsafe_allow_html=True)
