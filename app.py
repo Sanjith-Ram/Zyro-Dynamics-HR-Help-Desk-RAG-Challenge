@@ -1,6 +1,7 @@
 import os
+import glob
 import streamlit as st
-from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -18,11 +19,8 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
 .main { background-color: #F8F9FB; }
-
 .chat-header {
     background: linear-gradient(135deg, #1A3C5E 0%, #2D6A9F 100%);
     color: white;
@@ -32,7 +30,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .chat-header h1 { margin: 0; font-size: 1.6rem; font-weight: 600; }
 .chat-header p  { margin: 0.3rem 0 0; font-size: 0.9rem; opacity: 0.85; }
-
 .source-box {
     background: #EFF4FB;
     border-left: 3px solid #2D6A9F;
@@ -61,46 +58,35 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Pipeline (cached) ─────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────
 CORPUS_PATH = os.environ.get("CORPUS_PATH", "./hr_docs/")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-RAG_PROMPT = ChatPromptTemplate.from_template("""
-You are an HR assistant for Zyro Dynamics. Answer the employee's question using ONLY the provided context from the HR policy documents.
+RAG_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an HR assistant for Zyro Dynamics. Answer the employee's question using ONLY the provided context from the HR policy documents.
 If the answer is not found in the context, say "I don't have information about that in the HR policy documents."
 Be concise, professional, and helpful.
 
 Context:
-{context}
+{context}"""),
+    ("human", "{question}")
+])
 
-Question: {question}
-
-Answer:
-""")
-
-OOS_PROMPT = ChatPromptTemplate.from_template("""
-You are a classifier that determines if a question is related to HR topics.
-HR topics include: leave policies, payroll, benefits, compensation, attendance,
-recruitment, onboarding, offboarding, performance, training, compliance,
-workplace policies, employee conduct, and similar HR-related subjects.
-
-Respond with ONLY "YES" if the question is HR-related, or "NO" if it is out of scope.
-
-Question: {question}
-Answer:
-""")
+OOS_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a classifier. Determine if the question is HR-related.
+HR topics include: leave policies, payroll, benefits, compensation, attendance, recruitment, onboarding, offboarding, performance, training, compliance, workplace policies, employee conduct.
+Reply with ONLY the word YES or NO. Nothing else."""),
+    ("human", "{question}")
+])
 
 REFUSAL_MESSAGE = (
     "I'm sorry, I can only answer questions related to Zyro Dynamics HR policies. "
     "Please ask about topics like leave, payroll, benefits, compliance, or other HR-related matters."
 )
 
+# ── Pipeline (cached) ─────────────────────────────────────────
 @st.cache_resource(show_spinner="Building RAG pipeline…")
 def build_pipeline():
-    import glob
-    from langchain_community.document_loaders import PyPDFLoader
-
-    # Load each PDF individually, skipping corrupted ones
     documents = []
     pdf_files = glob.glob(os.path.join(CORPUS_PATH, "**/*.pdf"), recursive=True) + \
                 glob.glob(os.path.join(CORPUS_PATH, "*.pdf"))
@@ -110,10 +96,8 @@ def build_pipeline():
             loader = PyPDFLoader(pdf_path)
             docs = loader.load()
             documents.extend(docs)
-            print(f"✅ Loaded: {os.path.basename(pdf_path)} ({len(docs)} pages)")
         except Exception as e:
             st.warning(f"⚠️ Skipped corrupted file: {os.path.basename(pdf_path)}")
-            print(f"❌ Skipped {pdf_path}: {e}")
 
     if not documents:
         st.error("No valid HR documents found. Please check your CORPUS_PATH.")
@@ -126,28 +110,41 @@ def build_pipeline():
     vectorstore = FAISS.from_documents(chunks, embeddings)
     retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 4})
 
-    llm = ChatGroq(model="llama3-8b-8192", temperature=0.1, max_tokens=512, api_key=GROQ_API_KEY)
+    llm = ChatGroq(
+        model="llama3-8b-8192",
+        temperature=0.1,
+        max_tokens=1024,
+        groq_api_key=GROQ_API_KEY
+    )
     return retriever, llm
 
+# ── Helpers ───────────────────────────────────────────────────
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
-retriever, llm = build_pipeline()
-
 def ask_bot(question: str, retriever, llm):
-    oos_check = StrOutputParser().invoke(
-        llm.invoke(OOS_PROMPT.invoke({"question": question}))
-    ).strip().upper()
+    try:
+        oos_response = llm.invoke(OOS_PROMPT.format_messages(question=question))
+        oos_check = StrOutputParser().invoke(oos_response).strip().upper()
+    except Exception as e:
+        st.error(f"Guardrail error: {e}")
+        return {"answer": "An error occurred. Please try again.", "sources": [], "in_scope": False}
 
     if "NO" in oos_check:
         return {"answer": REFUSAL_MESSAGE, "sources": [], "in_scope": False}
 
-    docs = retriever.invoke(question)
-    context = format_docs(docs)
-    answer = StrOutputParser().invoke(
-        llm.invoke(RAG_PROMPT.invoke({"context": context, "question": question}))
-    )
-    return {"answer": answer, "sources": docs, "in_scope": True}
+    try:
+        docs = retriever.invoke(question)
+        context = format_docs(docs)
+        rag_response = llm.invoke(RAG_PROMPT.format_messages(context=context, question=question))
+        answer = StrOutputParser().invoke(rag_response)
+        return {"answer": answer, "sources": docs, "in_scope": True}
+    except Exception as e:
+        st.error(f"RAG error: {e}")
+        return {"answer": "An error occurred. Please try again.", "sources": [], "in_scope": False}
+
+# ── Build pipeline at startup ─────────────────────────────────
+retriever, llm = build_pipeline()
 
 # ── Session state ─────────────────────────────────────────────
 if "messages" not in st.session_state:
